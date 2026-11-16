@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>UI Issue Tracker</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@500&display=swap">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<header class="bar">
+  <div class="wrap">
+    <div class="brand"><h1>UI Issues</h1><span class="count" id="count"></span></div>
+    <div class="seg" role="group" aria-label="Whose tasks" id="viewSeg" hidden>
+      <button type="button" data-view="mine" aria-pressed="true">Mine<span class="n" id="n-mine"></span></button>
+      <button type="button" data-view="theirs" aria-pressed="false">Theirs<span class="n" id="n-theirs"></span></button>
+      <button type="button" data-view="all" aria-pressed="false">All<span class="n" id="n-all"></span></button>
+    </div>
+    <button type="button" class="btn primary" id="newBtn" hidden>New task</button>
+    <div class="me" id="meBox" hidden><span id="meAvatar"></span><button type="button" class="btn ghost" data-act="signout">Sign out</button></div>
+  </div>
+</header>
+
+<main><div class="wrap" id="main">
+  <div class="notice"><h2>Loading…</h2><p>Connecting to the board.</p></div>
+</div></main>
+
+<div id="overlay"></div>
+<div id="toast" class="toast" hidden></div>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
+<script src="config.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
