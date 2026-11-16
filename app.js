@@ -3,16 +3,19 @@
   const PREFIX = CFG.keyPrefix || "UI";
   const BUCKET = "screenshots";
   const STATUSES = [
-    { id: "todo", label: "To do", color: "var(--p-low)" },
-    { id: "doing", label: "In progress", color: "var(--jira)" },
-    { id: "review", label: "In review", color: "var(--figma)" },
-    { id: "done", label: "Done", color: "var(--ok)" },
+    { id: "todo", label: "To do" },
+    { id: "done", label: "Done" },
   ];
+  // Older tasks may still carry "doing"/"review"; treat anything not done as to do.
+  const statusOf = (i) => (i.status === "done" ? "done" : "todo");
   const PRI = { high: "High", med: "Medium", low: "Low" };
   const PRI_ORDER = { high: 0, med: 1, low: 2 };
 
-  const S = { sb: null, me: null, members: [], issues: [], view: "mine", editing: null, urls: {}, channel: null };
-  try { const v = localStorage.getItem("uit:view"); if (v) S.view = v; } catch (e) {}
+  const S = { sb: null, me: null, members: [], issues: [], view: "mine", q: "", showDone: true, editing: null, urls: {}, channel: null };
+  try {
+    const v = localStorage.getItem("uit:view"); if (v) S.view = v;
+    if (localStorage.getItem("uit:showDone") === "0") S.showDone = false;
+  } catch (e) {}
 
   const $ = (s, el = document) => el.querySelector(s);
   const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -33,6 +36,7 @@
     link: '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M10 14a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-1 1M14 10a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l1-1"/></svg>',
     img: '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="2"/><path d="m21 17-5-5-9 8"/></svg>',
     x: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>',
+    check: '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7.5"/></svg>',
   };
   function linkInfo(url) {
     let u; try { u = new URL(url); } catch (e) { return { kind: "link", label: url }; }
@@ -91,14 +95,17 @@
 
   // ---- Board ----
   function visible() {
-    if (S.view === "mine") return S.issues.filter((i) => i.assignee === S.me);
-    if (S.view === "theirs") return S.issues.filter((i) => i.assignee !== S.me);
-    return S.issues;
+    let list = S.issues;
+    if (S.view === "mine") list = list.filter((i) => i.assignee === S.me);
+    else if (S.view === "theirs") list = list.filter((i) => i.assignee !== S.me);
+    const q = S.q.trim().toLowerCase();
+    if (q) list = list.filter((i) => i.title.toLowerCase().includes(q) || `${PREFIX}-${i.num}`.toLowerCase() === q);
+    return list;
   }
   function render() {
     const mine = S.issues.filter((i) => i.assignee === S.me).length;
     $("#n-mine").textContent = mine; $("#n-theirs").textContent = S.issues.length - mine; $("#n-all").textContent = S.issues.length;
-    $("#count").textContent = `${S.issues.filter((i) => i.status !== "done").length} open`;
+    $("#count").textContent = `${S.issues.filter((i) => statusOf(i) === "todo").length} open`;
     document.querySelectorAll("#viewSeg button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.view === S.view)));
 
     if (!S.issues.length) {
@@ -106,24 +113,46 @@
       return;
     }
     const items = visible();
-    $("#main").innerHTML = `<div class="board">${STATUSES.map((st) => {
-      const list = items.filter((i) => i.status === st.id).sort((a, b) =>
-        st.id === "done" ? time(b.updated_at) - time(a.updated_at)
-          : (PRI_ORDER[a.priority] ?? 1) - (PRI_ORDER[b.priority] ?? 1) || time(b.updated_at) - time(a.updated_at));
-      return `<section class="lane ${st.id}" aria-label="${st.label}">
-        <div class="lane-h"><span class="dot" style="background:${st.color}"></span><h2>${st.label}</h2><span class="n">${list.length}</span></div>
-        ${list.length ? list.map(card).join("") : `<div class="lane-empty">Nothing here.</div>`}
-      </section>`;
-    }).join("")}</div>`;
+    if (!items.length) {
+      $("#main").innerHTML = `<div class="list-empty">${S.q.trim() ? `No tasks match “${esc(S.q.trim())}”.` : "No tasks in this view."}</div>`;
+      return;
+    }
+    const todo = items.filter((i) => statusOf(i) === "todo").sort((a, b) =>
+      (PRI_ORDER[a.priority] ?? 1) - (PRI_ORDER[b.priority] ?? 1) || time(b.updated_at) - time(a.updated_at));
+    const done = items.filter((i) => statusOf(i) === "done").sort((a, b) => time(b.updated_at) - time(a.updated_at));
+    $("#main").innerHTML = `
+      <section class="group" aria-label="To do">
+        <div class="group-h"><h2>To do</h2><span class="n">${todo.length}</span></div>
+        <div class="rows">${todo.length ? todo.map(row).join("") : `<div class="list-empty">All caught up.</div>`}</div>
+      </section>
+      ${done.length ? `<section class="group done" aria-label="Done">
+        <button type="button" class="group-h toggle" data-act="toggle-done" aria-expanded="${S.showDone}">
+          <span class="caret" aria-hidden="true">${S.showDone ? "▾" : "▸"}</span><h2>Done</h2><span class="n">${done.length}</span></button>
+        ${S.showDone ? `<div class="rows">${done.map(row).join("")}</div>` : ""}
+      </section>` : ""}`;
   }
-  function card(i) {
-    const links = (i.links || []).slice(0, 3).map((l) => { const inf = linkInfo(l.url); return `<span class="chip ${inf.kind}">${ICON[inf.kind]}<span>${esc(inf.label)}</span></span>`; }).join("");
+  function row(i) {
+    const isDone = statusOf(i) === "done";
+    const links = (i.links || []).slice(0, 2).map((l) => { const inf = linkInfo(l.url); return `<span class="chip ${inf.kind}">${ICON[inf.kind]}<span>${esc(inf.label)}</span></span>`; }).join("");
     const shots = (i.screenshots || []).length ? `<span class="chip">${ICON.img}${i.screenshots.length}</span>` : "";
-    return `<button type="button" class="card" data-open="${esc(i.id)}">
-      <span class="top"><span class="pri ${esc(i.priority)}" title="${PRI[i.priority] || ""} priority"></span>${PREFIX}-${i.num}</span>
-      <span class="title">${esc(i.title)}</span>
-      <span class="meta">${links}${shots}<span class="who">${avatar(i.assignee)}</span></span>
-    </button>`;
+    return `<div class="row${isDone ? " is-done" : ""}">
+      <button type="button" class="check" data-toggle="${esc(i.id)}" role="checkbox" aria-checked="${isDone}" aria-label="${isDone ? "Reopen" : "Mark done"}: ${esc(i.title)}" title="${isDone ? "Reopen" : "Mark done"}">${ICON.check}</button>
+      <button type="button" class="row-main" data-open="${esc(i.id)}">
+        <span class="pri ${esc(i.priority)}" title="${PRI[i.priority] || ""} priority"></span>
+        <span class="key">${PREFIX}-${i.num}</span>
+        <span class="title">${esc(i.title)}</span>
+        <span class="meta">${links}${shots}${avatar(i.assignee)}</span>
+      </button>
+    </div>`;
+  }
+  async function toggleDone(id) {
+    const i = S.issues.find((x) => x.id === id); if (!i) return;
+    const prev = i.status;
+    const next = statusOf(i) === "done" ? "todo" : "done";
+    i.status = next; i.updated_at = new Date().toISOString(); render();
+    const { error } = await S.sb.from("issues").update({ status: next }).eq("id", id);
+    if (error) { i.status = prev; render(); toast("Couldn't update that task. Try again."); return; }
+    toast(next === "done" ? `${PREFIX}-${i.num} done` : `${PREFIX}-${i.num} reopened`);
   }
 
   // ---- Drawer ----
@@ -131,6 +160,7 @@
     const isNew = !issue;
     const d = issue ? JSON.parse(JSON.stringify(issue))
       : { id: null, title: "", description: "", status: "todo", priority: "med", assignee: S.me, links: [], screenshots: [] };
+    d.status = statusOf(d);
     S.editing = { d, isNew, uploaded: [], pending: 0, confirmDel: false };
     drawDrawer();
     if (isNew) setTimeout(() => $("#f-title")?.focus(), 30);
@@ -148,7 +178,7 @@
       `<option value="${esc(m.email)}" ${m.email === d.assignee ? "selected" : ""}>${esc(m.display_name)}${m.email === S.me ? " (me)" : ""}</option>`).join("");
     $("#overlay").innerHTML = `
       <div class="scrim" data-act="close"></div>
-      <aside class="drawer" role="dialog" aria-modal="true" aria-label="${e.isNew ? "New task" : "Edit task"}">
+      <div class="dialog" role="dialog" aria-modal="true" aria-label="${e.isNew ? "New task" : "Edit task"}">
         <div class="drawer-h"><span class="key">${e.isNew ? "New task" : `${PREFIX}-${d.num}`}</span>
           <button type="button" class="icon-btn x" data-act="close" aria-label="Close">${ICON.x}</button></div>
         <div class="drawer-b">
@@ -158,17 +188,17 @@
             <div class="field"><label for="f-status">Status</label><select id="f-status">${STATUSES.map((s) => `<option value="${s.id}" ${s.id === d.status ? "selected" : ""}>${s.label}</option>`).join("")}</select></div>
             <div class="field"><label for="f-priority">Priority</label><select id="f-priority">${Object.entries(PRI).map(([k, v]) => `<option value="${k}" ${k === d.priority ? "selected" : ""}>${v}</option>`).join("")}</select></div>
           </div>
-          <div class="field"><label for="f-desc">Notes</label><textarea id="f-desc" placeholder="Context, acceptance criteria, what changed…">${esc(d.description)}</textarea></div>
-          <div class="field"><span class="lbl">Links</span>
-            <div class="links">${d.links.map((l, ix) => `<div class="link-row">${chip(l.url)}<button type="button" class="icon-btn" data-rmlink="${ix}" aria-label="Remove link">${ICON.x}</button></div>`).join("")}</div>
-            <form class="link-add" id="linkForm"><input id="f-link" type="url" inputmode="url" placeholder="Paste a Figma, Jira or any URL"><button class="btn" type="submit">Add</button></form>
-          </div>
           <div class="field"><span class="lbl">Screenshots</span>
             ${d.screenshots.length || e.pending ? `<div class="shots">${d.screenshots.map((p, ix) => `<div class="shot">${S.urls[p]
               ? `<button type="button" class="open" data-zoom="${esc(p)}" aria-label="View screenshot"><img src="${esc(S.urls[p])}" alt="Screenshot ${ix + 1}" loading="lazy"></button>`
               : `<span class="shot pending" style="border:0;height:100%">Loading…</span>`}<button type="button" class="icon-btn rm" data-rmshot="${ix}" aria-label="Remove screenshot">${ICON.x}</button></div>`).join("")}${Array.from({ length: e.pending }, () => `<div class="shot pending">Uploading…</div>`).join("")}</div>` : ""}
             <div class="drop" id="drop">Paste an image (⌘V / Ctrl+V), drop it here, or <label for="f-file">choose a file</label><input id="f-file" type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden></div>
           </div>
+          <div class="field"><span class="lbl">Links</span>
+            <div class="links">${d.links.map((l, ix) => `<div class="link-row">${chip(l.url)}<button type="button" class="icon-btn" data-rmlink="${ix}" aria-label="Remove link">${ICON.x}</button></div>`).join("")}</div>
+            <form class="link-add" id="linkForm"><input id="f-link" type="url" inputmode="url" placeholder="Paste a Figma, Jira or any URL"><button class="btn" type="submit">Add</button></form>
+          </div>
+          <div class="field"><label for="f-desc">Notes</label><textarea id="f-desc" class="notes" placeholder="Context, acceptance criteria, what changed…">${esc(d.description)}</textarea></div>
           ${!e.isNew && d.created_by ? `<p class="hint">Created by ${esc(nameOf(d.created_by))} · ${new Date(d.created_at).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" })}</p>` : ""}
         </div>
         <div class="drawer-f">
@@ -177,7 +207,7 @@
           <button type="button" class="btn" data-act="close">Cancel</button>
           <button type="button" class="btn primary" data-act="save" ${e.pending ? "disabled" : ""}>${e.isNew ? "Create task" : "Save"}</button>
         </div>
-      </aside>`;
+      </div>`;
   }
   function syncForm() {
     const e = S.editing; if (!e || !$("#f-title")) return;
@@ -235,7 +265,7 @@
 
   // ---- Auth ----
   function showSignIn(msg) {
-    ["#viewSeg", "#newBtn", "#meBox"].forEach((s) => ($(s).hidden = true));
+    ["#viewSeg", "#newBtn", "#meBox", "#q"].forEach((s) => ($(s).hidden = true));
     $("#count").textContent = "";
     notice("Sign in", msg || "Enter your email and we'll send you a sign-in link. Only people on this board can get in.",
       `<form class="auth" id="signinForm"><label class="hint" for="f-email">Email</label><input id="f-email" type="email" autocomplete="email" required><button class="btn primary" type="submit">Send sign-in link</button></form>`);
@@ -253,7 +283,7 @@
       showSignIn(`${S.me} isn't on this board. Ask the board owner to add you, or sign in with a different email.`);
       return;
     }
-    ["#viewSeg", "#newBtn", "#meBox"].forEach((s) => ($(s).hidden = false));
+    ["#viewSeg", "#newBtn", "#meBox", "#q"].forEach((s) => ($(s).hidden = false));
     $("#meAvatar").innerHTML = avatar(S.me);
     render();
     if (!S.channel) {
@@ -265,8 +295,9 @@
 
   // ---- Events ----
   document.addEventListener("click", async (ev) => {
-    const t = ev.target.closest("[data-act],[data-open],[data-view],[data-rmlink],[data-rmshot],[data-zoom]");
+    const t = ev.target.closest("[data-act],[data-open],[data-toggle],[data-view],[data-rmlink],[data-rmshot],[data-zoom]");
     if (!t) return;
+    if (t.dataset.toggle) { toggleDone(t.dataset.toggle); return; }
     if (t.dataset.view) { S.view = t.dataset.view; try { localStorage.setItem("uit:view", S.view); } catch (e) {} render(); return; }
     if (t.dataset.open) { const i = S.issues.find((x) => x.id === t.dataset.open); if (i) openDrawer(i); return; }
     if (t.dataset.rmlink != null) { syncForm(); S.editing.d.links.splice(+t.dataset.rmlink, 1); drawDrawer(); return; }
@@ -283,9 +314,11 @@
     else if (a === "del") { syncForm(); S.editing.confirmDel = true; drawDrawer(); }
     else if (a === "del-no") { syncForm(); S.editing.confirmDel = false; drawDrawer(); }
     else if (a === "del-yes") del();
+    else if (a === "toggle-done") { S.showDone = !S.showDone; try { localStorage.setItem("uit:showDone", S.showDone ? "1" : "0"); } catch (e) {} render(); }
     else if (a === "signout") { await S.sb.auth.signOut(); location.reload(); }
   });
   $("#newBtn").addEventListener("click", () => openDrawer(null));
+  $("#q").addEventListener("input", (ev) => { S.q = ev.target.value; render(); });
   document.addEventListener("submit", (ev) => {
     if (ev.target.id === "linkForm") { ev.preventDefault(); addLinkFromInput(); }
     if (ev.target.id === "signinForm") { ev.preventDefault(); sendLink($("#f-email").value.trim().toLowerCase()); }
