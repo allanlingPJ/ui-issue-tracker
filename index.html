@@ -30,7 +30,9 @@
 <div id="toast" class="toast" hidden></div>
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
-<script src="config.js"></script>
-<script src="app.js"></script>
+<script>
+  // Load our own files with a fresh query string each visit so a stale cached copy is never used.
+  ["config.js", "app.js"].forEach((f) => document.write(`<script src="${f}?v=${Date.now()}"><\/script>`));
+</script>
 </body>
 </html>

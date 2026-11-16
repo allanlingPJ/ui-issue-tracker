@@ -305,8 +305,12 @@
   });
 
   // ---- Boot ----
-  if (!CFG.supabaseUrl || !CFG.supabaseAnonKey || !window.supabase) {
+  if (!CFG.supabaseUrl || !CFG.supabaseAnonKey) {
     notice("Setup needed", "Add your Supabase project URL and anon key to config.js, then reload. See README.md for the steps.");
+    return;
+  }
+  if (!window.supabase) {
+    notice("Couldn't load the sign-in library", "The Supabase script from cdn.jsdelivr.net didn't load. If you use an ad or script blocker, allow that site, then reload.");
     return;
   }
   S.sb = window.supabase.createClient(CFG.supabaseUrl, CFG.supabaseAnonKey);
