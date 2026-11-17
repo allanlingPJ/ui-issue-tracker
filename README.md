@@ -18,6 +18,12 @@ A small task board shared between a developer and a designer. Each task has an a
 
 The anon key is safe to publish. It only allows what the database rules allow, and those rules only let in the emails in `members`.
 
+## Updates that need a database change
+
+If your board was set up before these existed, run each file in [`supabase/migrations/`](supabase/migrations) once in **SQL Editor**:
+
+- `001_resolution.sql`: lets you add a resolution note and screenshots when marking a task done. Until it's run, ticking a task marks it done straight away as before.
+
 ## Adding or removing people
 
 In Supabase, open **Table Editor → members** and add or delete a row. Write the email in lowercase.

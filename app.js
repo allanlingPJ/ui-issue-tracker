@@ -11,7 +11,7 @@
   const PRI = { high: "High", med: "Medium", low: "Low" };
   const PRI_ORDER = { high: 0, med: 1, low: 2 };
 
-  const S = { sb: null, me: null, members: [], issues: [], view: "mine", q: "", showDone: true, editing: null, urls: {}, channel: null };
+  const S = { sb: null, me: null, noRes: false, members: [], issues: [], view: "mine", q: "", showDone: true, editing: null, urls: {}, channel: null };
   try {
     const v = localStorage.getItem("uit:view"); if (v) S.view = v;
     if (localStorage.getItem("uit:showDone") === "0") S.showDone = false;
@@ -81,7 +81,11 @@
     ]);
     if (m.error || i.error) throw m.error || i.error;
     S.members = m.data; S.issues = i.data;
+    // Until supabase/migrations/001_resolution.sql is run, the resolution columns don't exist: fall back to plain done/undone.
+    S.noRes = S.issues.length > 0 && !("resolution" in S.issues[0]);
   }
+  const RES_COLS = ["resolution", "resolution_shots", "resolved_by", "resolved_at"];
+  const stripRes = (o) => { if (S.noRes) RES_COLS.forEach((k) => delete o[k]); return o; };
   let reloadT;
   function scheduleReload() {
     clearTimeout(reloadT);
@@ -160,12 +164,13 @@
   function updateIssue(id, fields) {
     const cur = S.issues.find((x) => x.id === id) || {};
     const base = { title: cur.title, description: cur.description ?? "", assignee: cur.assignee ?? null, status: cur.status, priority: cur.priority, links: cur.links || [], screenshots: cur.screenshots || [] };
-    return S.sb.from("issues").upsert({ ...base, ...fields, id }, { onConflict: "id" }).select("id");
+    return S.sb.from("issues").upsert(stripRes({ ...base, ...fields, id }), { onConflict: "id" }).select("id");
   }
   async function toggleDone(id) {
     const i = S.issues.find((x) => x.id === id); if (!i) return;
     const prev = i.status;
     const next = statusOf(i) === "done" ? "todo" : "done";
+    if (next === "done" && !S.noRes) { openResolve(i); return; }
     i.status = next; i.updated_at = new Date().toISOString(); render();
     const { error } = await updateIssue(id, { status: next });
     if (error) { i.status = prev; render(); toast("Couldn't update that task. Try again."); return; }
@@ -201,21 +206,36 @@
     const d = issue ? JSON.parse(JSON.stringify(issue))
       : { id: null, title: "", description: "", status: "todo", priority: "med", assignee: S.me, links: [], screenshots: [] };
     d.status = statusOf(d);
-    S.editing = { d, isNew, uploaded: [], pending: 0, confirmDel: false, orig: snap(d) };
+    d.resolution ??= ""; d.resolution_shots ??= [];
+    S.editing = { d, isNew, uploaded: [], pending: { screenshots: 0, resolution_shots: 0 }, confirmDel: false, orig: snap(d), wasDone: d.status === "done" };
     S.editing.paged = paged;
     setTaskParam(isNew ? null : keyOf(d));
     drawDrawer();
     if (isNew) setTimeout(() => $("#f-title")?.focus(), 30);
-    if (d.screenshots.length) signedUrls(d.screenshots).then(() => { if (S.editing?.d === d) { syncForm(); drawDrawer(); } });
+    loadShots(d);
   }
-  const snap = (d) => JSON.stringify([d.title, d.description ?? "", d.assignee ?? null, d.status, d.priority, d.links, d.screenshots]);
+  // Marking done from the list: ask for a resolution and optional screenshots first.
+  function openResolve(issue) {
+    const d = JSON.parse(JSON.stringify(issue));
+    d.resolution ??= ""; d.resolution_shots ??= [];
+    S.editing = { d, isNew: false, mode: "resolve", uploaded: [], pending: { screenshots: 0, resolution_shots: 0 }, orig: snap(d) };
+    drawDrawer();
+    setTimeout(() => $("#f-res")?.focus(), 30);
+    loadShots(d);
+  }
+  function loadShots(d) {
+    const paths = [...d.screenshots, ...d.resolution_shots];
+    if (paths.length) signedUrls(paths).then(() => { if (S.editing?.d === d) { syncForm(); drawDrawer(); } });
+  }
+  const snap = (d) => JSON.stringify([d.title, d.description ?? "", d.assignee ?? null, d.status, d.priority, d.links, d.screenshots, d.resolution ?? "", d.resolution_shots || []]);
+  const pendingN = (e) => e.pending.screenshots + e.pending.resolution_shots;
   function isDirty() {
     const e = S.editing; if (!e) return false;
     syncForm();
-    return e.uploaded.length > 0 || e.pending > 0 || snap(e.d) !== e.orig || !!$("#f-link")?.value.trim();
+    return e.uploaded.length > 0 || pendingN(e) > 0 || snap(e.d) !== e.orig || !!$("#f-link")?.value.trim();
   }
   function pagerPos() {
-    const e = S.editing; if (!e || e.isNew) return null;
+    const e = S.editing; if (!e || e.isNew || e.mode === "resolve") return null;
     const list = pageOrder();
     const ix = list.findIndex((x) => x.id === e.d.id);
     return ix < 0 ? null : { list, ix };
@@ -245,8 +265,37 @@
     S.editing = null; $("#overlay").innerHTML = "";
     setTaskParam(null);
   }
+  function shotsField(field, label) {
+    const e = S.editing, list = e.d[field], n = e.pending[field];
+    return `<div class="field"><span class="lbl">${label}</span>
+      ${list.length || n ? `<div class="shots">${list.map((p, ix) => `<div class="shot">${S.urls[p]
+        ? `<button type="button" class="open" data-zoom="${esc(p)}" aria-label="View screenshot"><img src="${esc(S.urls[p])}" alt="Screenshot ${ix + 1}" loading="lazy"></button>`
+        : `<span class="shot pending" style="border:0;height:100%">Loading…</span>`}<button type="button" class="icon-btn rm" data-rmshot="${ix}" data-field="${field}" aria-label="Remove screenshot">${ICON.x}</button></div>`).join("")}${Array.from({ length: n }, () => `<div class="shot pending">Uploading…</div>`).join("")}</div>` : ""}
+      <div class="drop" data-field="${field}">Paste an image (⌘V / Ctrl+V), drop it here, or <label for="f-file-${field}">choose a file</label><input id="f-file-${field}" data-field="${field}" type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden></div>
+    </div>`;
+  }
+  const resolvedHint = (d) => d.resolved_by ? `<p class="hint">Resolved by ${esc(nameOf(d.resolved_by))}${d.resolved_at ? " · " + new Date(d.resolved_at).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" }) : ""}</p>` : "";
+  function drawResolve() {
+    const e = S.editing, d = e.d;
+    $("#overlay").innerHTML = `
+      <div class="scrim" data-act="close"></div>
+      <div class="dialog resolve" role="dialog" aria-modal="true" aria-labelledby="res-h">
+        <div class="drawer-h"><span class="key">${keyOf(d)}</span><h2 id="res-h" class="res-h">Mark as done</h2>
+          <button type="button" class="icon-btn x" data-act="close" aria-label="Close">${ICON.x}</button></div>
+        <div class="drawer-b">
+          <p class="res-title">${esc(d.title)}</p>
+          <div class="field"><label for="f-res">Resolution</label><textarea id="f-res" class="res" placeholder="What was fixed or decided? Optional.">${esc(d.resolution)}</textarea></div>
+          ${shotsField("resolution_shots", "Screenshots of the fix")}
+        </div>
+        <div class="drawer-f"><span class="hint">⌘↵ to confirm</span><span class="spacer"></span>
+          <button type="button" class="btn" data-act="close">Cancel</button>
+          <button type="button" class="btn primary" data-act="save" ${pendingN(e) ? "disabled" : ""}>Mark done</button>
+        </div>
+      </div>`;
+  }
   function drawDrawer() {
     const e = S.editing; if (!e) return;
+    if (e.mode === "resolve") { drawResolve(); return; }
     const d = e.d;
     const people = `<option value="">Unassigned</option>` + S.members.map((m) =>
       `<option value="${esc(m.email)}" ${m.email === d.assignee ? "selected" : ""}>${esc(m.display_name)}${m.email === S.me ? " (me)" : ""}</option>`).join("");
@@ -270,29 +319,30 @@
             <div class="field"><label for="f-status">Status</label><select id="f-status">${STATUSES.map((s) => `<option value="${s.id}" ${s.id === d.status ? "selected" : ""}>${s.label}</option>`).join("")}</select></div>
             <div class="field"><label for="f-priority">Priority</label><select id="f-priority">${Object.entries(PRI).map(([k, v]) => `<option value="${k}" ${k === d.priority ? "selected" : ""}>${v}</option>`).join("")}</select></div>
           </div>
-          <div class="field"><span class="lbl">Screenshots</span>
-            ${d.screenshots.length || e.pending ? `<div class="shots">${d.screenshots.map((p, ix) => `<div class="shot">${S.urls[p]
-              ? `<button type="button" class="open" data-zoom="${esc(p)}" aria-label="View screenshot"><img src="${esc(S.urls[p])}" alt="Screenshot ${ix + 1}" loading="lazy"></button>`
-              : `<span class="shot pending" style="border:0;height:100%">Loading…</span>`}<button type="button" class="icon-btn rm" data-rmshot="${ix}" aria-label="Remove screenshot">${ICON.x}</button></div>`).join("")}${Array.from({ length: e.pending }, () => `<div class="shot pending">Uploading…</div>`).join("")}</div>` : ""}
-            <div class="drop" id="drop">Paste an image (⌘V / Ctrl+V), drop it here, or <label for="f-file">choose a file</label><input id="f-file" type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden></div>
-          </div>
+          ${shotsField("screenshots", "Screenshots")}
           <div class="field"><span class="lbl">Links</span>
             <div class="links">${d.links.map((l, ix) => `<div class="link-row">${chip(l.url)}<button type="button" class="icon-btn" data-rmlink="${ix}" aria-label="Remove link">${ICON.x}</button></div>`).join("")}</div>
             <form class="link-add" id="linkForm"><input id="f-link" type="url" inputmode="url" placeholder="Paste a Figma, Jira or any URL"><button class="btn" type="submit">Add</button></form>
           </div>
           <div class="field"><label for="f-desc">Notes</label><textarea id="f-desc" class="notes" placeholder="Context, acceptance criteria, what changed…">${esc(d.description)}</textarea></div>
+          ${d.status === "done" && !S.noRes ? `<div class="res-sec">
+            <div class="field"><label for="f-res">Resolution</label><textarea id="f-res" class="res" placeholder="What was fixed or decided? Optional.">${esc(d.resolution)}</textarea></div>
+            ${shotsField("resolution_shots", "Screenshots of the fix")}${resolvedHint(d)}
+          </div>` : ""}
           ${!e.isNew && d.created_by ? `<p class="hint">Created by ${esc(nameOf(d.created_by))} · ${new Date(d.created_at).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" })}</p>` : ""}
         </div>
         <div class="drawer-f">
           ${e.isNew ? "" : e.confirmDel ? `<button type="button" class="btn danger" data-act="del-yes">Delete for both of you</button><button type="button" class="btn ghost" data-act="del-no">Keep</button>` : `<button type="button" class="btn ghost danger" data-act="del">Delete</button>`}
           <span class="spacer"></span>
           <button type="button" class="btn" data-act="close">Cancel</button>
-          <button type="button" class="btn primary" data-act="save" ${e.pending ? "disabled" : ""}>${e.isNew ? "Create task" : "Save"}</button>
+          <button type="button" class="btn primary" data-act="save" ${pendingN(e) ? "disabled" : ""}>${e.isNew ? "Create task" : "Save"}</button>
         </div>
       </div>`;
   }
   function syncForm() {
-    const e = S.editing; if (!e || !$("#f-title")) return;
+    const e = S.editing; if (!e) return;
+    if ($("#f-res")) e.d.resolution = $("#f-res").value;
+    if (!$("#f-title")) return;
     e.d.title = $("#f-title").value; e.d.description = $("#f-desc").value;
     e.d.assignee = $("#f-assignee").value || null; e.d.status = $("#f-status").value; e.d.priority = $("#f-priority").value;
   }
@@ -303,37 +353,59 @@
     syncForm(); S.editing.d.links.push({ url }); drawDrawer(); $("#f-link")?.focus();
   }
   const EXT = { "image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "image/webp": "webp" };
-  async function uploadFiles(files) {
+  async function uploadFiles(files, field = "screenshots") {
     const e = S.editing; if (!e) return;
     const imgs = [...files].filter((f) => EXT[f.type]);
     if (!imgs.length) { toast("Only PNG, JPG, GIF or WebP images can be attached."); return; }
-    syncForm(); e.pending += imgs.length; drawDrawer();
+    syncForm(); e.pending[field] += imgs.length; drawDrawer();
     for (const f of imgs) {
       const path = `${crypto.randomUUID()}.${EXT[f.type]}`;
       const { error } = await S.sb.storage.from(BUCKET).upload(path, f, { contentType: f.type });
       if (error) toast(/size|large/i.test(error.message) ? "That image is over 10 MB." : "Couldn't upload that image. Try again.");
       else if (S.editing !== e) S.sb.storage.from(BUCKET).remove([path]);
-      else { e.uploaded.push(path); e.d.screenshots.push(path); S.urls[path] = URL.createObjectURL(f); }
-      if (S.editing === e) { e.pending--; syncForm(); drawDrawer(); }
+      else { e.uploaded.push(path); e.d[field].push(path); S.urls[path] = URL.createObjectURL(f); }
+      if (S.editing === e) { e.pending[field]--; syncForm(); drawDrawer(); }
     }
   }
+  async function saveResolve() {
+    syncForm();
+    const e = S.editing, d = e.d;
+    if (pendingN(e)) return;
+    const btn = $('[data-act="save"]'); if (btn) btn.disabled = true;
+    const fields = { status: "done", resolution: d.resolution.trim(), resolution_shots: d.resolution_shots, resolved_by: S.me, resolved_at: new Date().toISOString() };
+    const res = await updateIssue(d.id, fields);
+    if (!res.error && !(res.data && res.data.length)) res.error = { message: "No rows updated (blocked by permissions or the task no longer exists)" };
+    if (res.error) { console.error("resolve failed", res.error); if (btn) btn.disabled = false; toast(`Couldn't mark done: ${res.error.message || "check your connection and try again."}`); return; }
+    const i = S.issues.find((x) => x.id === d.id);
+    if (i) { removeDropped(i, d); Object.assign(i, fields, { updated_at: fields.resolved_at }); }
+    toast(`${keyOf(d)} done`);
+    e.uploaded = []; closeDrawer(true); render(); scheduleReload();
+  }
+  // Delete stored images that were attached before this edit but removed during it.
+  function removeDropped(before, d) {
+    const keep = new Set([...d.screenshots, ...d.resolution_shots]);
+    const removed = [...(before.screenshots || []), ...(before.resolution_shots || [])].filter((p) => !keep.has(p));
+    if (removed.length) S.sb.storage.from(BUCKET).remove(removed);
+  }
   async function save() {
+    if (S.editing?.mode === "resolve") return saveResolve();
     syncForm();
     const e = S.editing; const d = e.d;
+    if (pendingN(e)) return;
     if ($("#f-link")?.value.trim()) addLinkFromInput();
     if (!d.title.trim()) { toast("Give the task a title first."); $("#f-title")?.focus(); return; }
     const body = { title: d.title.trim(), description: d.description, assignee: d.assignee, status: d.status, priority: d.priority, links: d.links, screenshots: d.screenshots };
+    if (!S.noRes && (d.status === "done" || !e.isNew)) {
+      Object.assign(body, { resolution: d.resolution.trim(), resolution_shots: d.resolution_shots });
+      if (d.status === "done" && !e.wasDone) Object.assign(body, { resolved_by: S.me, resolved_at: new Date().toISOString() });
+    }
     const btn = $('[data-act="save"]'); if (btn) btn.disabled = true;
     const res = e.isNew
       ? await S.sb.from("issues").insert(body).select("num").single()
       : await updateIssue(d.id, body);
     if (!res.error && !e.isNew && !(res.data && res.data.length)) res.error = { message: "No rows updated (blocked by permissions or the task no longer exists)" };
     if (res.error) { console.error("save failed", res.error); if (btn) btn.disabled = false; toast(`Couldn't save: ${res.error.message || "check your connection and try again."}`); return; }
-    if (!e.isNew) {
-      const before = S.issues.find((i) => i.id === d.id)?.screenshots || [];
-      const removed = before.filter((p) => !d.screenshots.includes(p));
-      if (removed.length) S.sb.storage.from(BUCKET).remove(removed);
-    }
+    if (!e.isNew) { const before = S.issues.find((i) => i.id === d.id); if (before) removeDropped(before, d); }
     toast(e.isNew ? `Created ${PREFIX}-${res.data.num}` : "Saved");
     e.uploaded = []; closeDrawer(true); scheduleReload();
   }
@@ -341,7 +413,8 @@
     const e = S.editing;
     const { error } = await S.sb.from("issues").delete().eq("id", e.d.id);
     if (error) { toast("Couldn't delete. Try again."); return; }
-    const paths = [...new Set([...(S.issues.find((i) => i.id === e.d.id)?.screenshots || []), ...e.uploaded])];
+    const cur = S.issues.find((i) => i.id === e.d.id) || {};
+    const paths = [...new Set([...(cur.screenshots || []), ...(cur.resolution_shots || []), ...e.uploaded])];
     if (paths.length) S.sb.storage.from(BUCKET).remove(paths);
     e.uploaded = []; closeDrawer(true); toast("Deleted"); scheduleReload();
   }
@@ -385,7 +458,7 @@
     if (t.dataset.view) { S.view = t.dataset.view; try { localStorage.setItem("uit:view", S.view); } catch (e) {} render(); return; }
     if (t.dataset.open) { const i = S.issues.find((x) => x.id === t.dataset.open); if (i) openDrawer(i); return; }
     if (t.dataset.rmlink != null) { syncForm(); S.editing.d.links.splice(+t.dataset.rmlink, 1); drawDrawer(); return; }
-    if (t.dataset.rmshot != null) { syncForm(); S.editing.d.screenshots.splice(+t.dataset.rmshot, 1); drawDrawer(); return; }
+    if (t.dataset.rmshot != null) { syncForm(); S.editing.d[t.dataset.field || "screenshots"].splice(+t.dataset.rmshot, 1); drawDrawer(); return; }
     if (t.dataset.zoom) {
       const lb = document.createElement("div"); lb.className = "lightbox";
       lb.innerHTML = `<img src="${esc(S.urls[t.dataset.zoom])}" alt="Screenshot, full size">`;
@@ -411,20 +484,26 @@
     if (ev.target.id === "linkForm") { ev.preventDefault(); addLinkFromInput(); }
     if (ev.target.id === "signinForm") { ev.preventDefault(); sendLink($("#f-email").value.trim().toLowerCase()); }
   });
-  document.addEventListener("change", (ev) => { if (ev.target.id === "f-file") uploadFiles(ev.target.files); });
+  document.addEventListener("change", (ev) => {
+    if (ev.target.matches('input[type="file"][data-field]')) uploadFiles(ev.target.files, ev.target.dataset.field);
+    // Switching the status to Done reveals the resolution fields.
+    if (ev.target.id === "f-status" && S.editing) { syncForm(); drawDrawer(); if (S.editing.d.status === "done") $("#f-res")?.focus(); }
+  });
   document.addEventListener("paste", (ev) => {
     if (!S.editing) return;
     const files = [...(ev.clipboardData?.files || [])].filter((f) => f.type.startsWith("image/"));
-    if (files.length) { ev.preventDefault(); uploadFiles(files); }
+    // Paste into the resolution when that's what the user is working on.
+    const toRes = S.editing.mode === "resolve" || !!document.activeElement?.closest?.(".res-sec");
+    if (files.length) { ev.preventDefault(); uploadFiles(files, toRes ? "resolution_shots" : "screenshots"); }
   });
-  document.addEventListener("dragover", (ev) => { const d = ev.target.closest?.("#drop"); if (d) { ev.preventDefault(); d.classList.add("over"); } });
-  document.addEventListener("dragleave", (ev) => { const d = ev.target.closest?.("#drop"); if (d) d.classList.remove("over"); });
-  document.addEventListener("drop", (ev) => { const d = ev.target.closest?.("#drop"); if (d) { ev.preventDefault(); d.classList.remove("over"); uploadFiles(ev.dataTransfer.files); } });
+  document.addEventListener("dragover", (ev) => { const d = ev.target.closest?.(".drop"); if (d) { ev.preventDefault(); d.classList.add("over"); } });
+  document.addEventListener("dragleave", (ev) => { const d = ev.target.closest?.(".drop"); if (d) d.classList.remove("over"); });
+  document.addEventListener("drop", (ev) => { const d = ev.target.closest?.(".drop"); if (d) { ev.preventDefault(); d.classList.remove("over"); uploadFiles(ev.dataTransfer.files, d.dataset.field); } });
   document.addEventListener("keydown", (ev) => {
     if (ev.key === "Escape") { const lb = $(".lightbox"); if (lb) lb.remove(); else if (S.editing) closeDrawer(false); }
     if (ev.key === "Enter" && (ev.metaKey || ev.ctrlKey) && S.editing) save();
     // Page through tasks with ↑/↓ (or K/J) unless the user is typing in a field.
-    if (S.editing && !S.editing.isNew && !ev.metaKey && !ev.ctrlKey && !ev.altKey && !$(".lightbox")) {
+    if (S.editing && !S.editing.isNew && S.editing.mode !== "resolve" && !ev.metaKey && !ev.ctrlKey && !ev.altKey && !$(".lightbox")) {
       const el = document.activeElement;
       const typing = el && (el.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName));
       const delta = { ArrowUp: -1, ArrowDown: 1, k: -1, j: 1 }[ev.key];

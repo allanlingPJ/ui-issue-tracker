@@ -31,6 +31,10 @@ create table if not exists public.issues (
   priority    text not null default 'med'  check (priority in ('high', 'med', 'low')),
   links       jsonb not null default '[]'::jsonb,  -- [{ "url": "https://..." }]
   screenshots jsonb not null default '[]'::jsonb,  -- ["<storage path>", ...]
+  resolution       text not null default '',      -- filled in when marked done
+  resolution_shots jsonb not null default '[]'::jsonb,
+  resolved_by      text,
+  resolved_at      timestamptz,
   created_by  text default lower(auth.jwt() ->> 'email'),
   created_at  timestamptz not null default now(),
   updated_at  timestamptz not null default now()
