@@ -12,8 +12,8 @@ A small task board shared between a developer and a designer. Each task has an a
 2. **Create the tables:** open **SQL Editor → New query** and paste in [`supabase/schema.sql`](supabase/schema.sql). Change the two emails and names at the bottom to yours and the designer's, then **Run**.
 3. **Allow sign-in from the site:** in **Authentication → URL Configuration**:
    - Set **Site URL** to the GitHub Pages URL, e.g. `https://<user>.github.io/ui-issue-tracker/`.
-   - Add the same URL under **Redirect URLs**.
-   - Add `http://localhost:8000/` too if you want to test locally.
+   - Add the same URL with `**` on the end under **Redirect URLs**, e.g. `https://<user>.github.io/ui-issue-tracker/**`. The wildcard lets a task link such as `…/?task=UI-12` survive sign-in.
+   - Add `http://localhost:8000/**` too if you want to test locally.
 4. **Connect the site:** in **Project Settings → API**, copy the **Project URL** and the **anon public** key into [`config.js`](config.js), then commit and push.
 
 The anon key is safe to publish. It only allows what the database rules allow, and those rules only let in the emails in `members`.

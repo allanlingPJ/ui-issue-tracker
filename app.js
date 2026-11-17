@@ -161,6 +161,29 @@
     toast(next === "done" ? `${PREFIX}-${i.num} done` : `${PREFIX}-${i.num} reopened`);
   }
 
+  // ---- Deep links: ?task=UI-12 ----
+  // A query param (not a hash) so it survives the magic-link redirect, which puts auth tokens in the hash.
+  const keyOf = (i) => `${PREFIX}-${i.num}`;
+  const taskUrl = (i) => { const u = new URL(location.href); u.hash = ""; u.searchParams.set("task", keyOf(i)); return u.href; };
+  function setTaskParam(key) {
+    const u = new URL(location.href);
+    if (key) u.searchParams.set("task", key); else u.searchParams.delete("task");
+    if (u.href !== location.href) history.replaceState(history.state, "", u.href);
+  }
+  function openFromUrl() {
+    const key = new URL(location.href).searchParams.get("task");
+    if (!key) { if (S.editing && !S.editing.isNew) closeDrawer(false); return; }
+    if (S.editing && !S.editing.isNew && keyOf(S.editing.d).toLowerCase() === key.toLowerCase()) return;
+    const i = S.issues.find((x) => keyOf(x).toLowerCase() === key.toLowerCase());
+    if (i) openDrawer(i);
+    else { setTaskParam(null); toast(`${key} wasn't found. It may have been deleted.`); }
+  }
+  async function copyLink(i) {
+    const url = taskUrl(i);
+    try { await navigator.clipboard.writeText(url); toast(`Link to ${keyOf(i)} copied`); }
+    catch (e) { prompt("Copy this link:", url); }
+  }
+
   // ---- Drawer ----
   function openDrawer(issue) {
     const isNew = !issue;
@@ -168,6 +191,7 @@
       : { id: null, title: "", description: "", status: "todo", priority: "med", assignee: S.me, links: [], screenshots: [] };
     d.status = statusOf(d);
     S.editing = { d, isNew, uploaded: [], pending: 0, confirmDel: false };
+    setTaskParam(isNew ? null : keyOf(d));
     drawDrawer();
     if (isNew) setTimeout(() => $("#f-title")?.focus(), 30);
     if (d.screenshots.length) signedUrls(d.screenshots).then(() => { if (S.editing?.d === d) { syncForm(); drawDrawer(); } });
@@ -176,6 +200,7 @@
     const e = S.editing; if (!e) return;
     if (!saved && e.uploaded.length) S.sb.storage.from(BUCKET).remove(e.uploaded);
     S.editing = null; $("#overlay").innerHTML = "";
+    setTaskParam(null);
   }
   function drawDrawer() {
     const e = S.editing; if (!e) return;
@@ -186,6 +211,7 @@
       <div class="scrim" data-act="close"></div>
       <div class="dialog" role="dialog" aria-modal="true" aria-label="${e.isNew ? "New task" : "Edit task"}">
         <div class="drawer-h"><span class="key">${e.isNew ? "New task" : `${PREFIX}-${d.num}`}</span>
+          ${e.isNew ? "" : `<button type="button" class="btn ghost copy-link" data-act="copy-link" title="Copy a link to this task">${ICON.link}<span>Copy link</span></button>`}
           <button type="button" class="icon-btn x" data-act="close" aria-label="Close">${ICON.x}</button></div>
         <div class="drawer-b">
           <input id="f-title" class="f-title" type="text" placeholder="What needs doing?" value="${esc(d.title)}" autocomplete="off">
@@ -279,7 +305,7 @@
   }
   async function sendLink(email) {
     const btn = $("#signinForm button"); btn.disabled = true;
-    const { error } = await S.sb.auth.signInWithOtp({ email, options: { emailRedirectTo: location.origin + location.pathname } });
+    const { error } = await S.sb.auth.signInWithOtp({ email, options: { emailRedirectTo: location.origin + location.pathname + location.search } });
     if (error) { btn.disabled = false; toast(/rate/i.test(error.message) ? "Too many emails sent. Wait a few minutes and try again." : "Couldn't send the link. Check the address and try again."); return; }
     notice("Check your email", `We sent a sign-in link to ${email}. Open it on this device to get in.`);
   }
@@ -293,6 +319,7 @@
     ["#viewSeg", "#newBtn", "#meBox", "#q"].forEach((s) => ($(s).hidden = false));
     $("#meAvatar").innerHTML = avatar(S.me);
     render();
+    openFromUrl();
     if (!S.channel) {
       S.channel = S.sb.channel("issues-live")
         .on("postgres_changes", { event: "*", schema: "public", table: "issues" }, scheduleReload)
@@ -321,10 +348,12 @@
     else if (a === "del") { syncForm(); S.editing.confirmDel = true; drawDrawer(); }
     else if (a === "del-no") { syncForm(); S.editing.confirmDel = false; drawDrawer(); }
     else if (a === "del-yes") del();
+    else if (a === "copy-link") { if (S.editing && !S.editing.isNew) copyLink(S.editing.d); }
     else if (a === "toggle-done") { S.showDone = !S.showDone; try { localStorage.setItem("uit:showDone", S.showDone ? "1" : "0"); } catch (e) {} render(); }
     else if (a === "signout") { await S.sb.auth.signOut(); location.reload(); }
   });
   $("#newBtn").addEventListener("click", () => openDrawer(null));
+  window.addEventListener("popstate", () => { if (S.me && member(S.me)) openFromUrl(); });
   $("#q").addEventListener("input", (ev) => { S.q = ev.target.value; render(); });
   document.addEventListener("submit", (ev) => {
     if (ev.target.id === "linkForm") { ev.preventDefault(); addLinkFromInput(); }
