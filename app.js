@@ -35,6 +35,8 @@
     jira: '<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 2 2 12l4 4 6-6 6 6 4-4L12 2Zm0 10-4 4 4 4 4-4-4-4Z"/></svg>',
     link: '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M10 14a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-1 1M14 10a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l1-1"/></svg>',
     img: '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="2"/><path d="m21 17-5-5-9 8"/></svg>',
+    up: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 15 6-6 6 6"/></svg>',
+    down: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>',
     x: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>',
     check: '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7.5"/></svg>',
   };
@@ -83,7 +85,7 @@
   let reloadT;
   function scheduleReload() {
     clearTimeout(reloadT);
-    reloadT = setTimeout(async () => { try { await loadAll(); render(); } catch (e) { console.error(e); } }, 150);
+    reloadT = setTimeout(async () => { try { await loadAll(); render(); refreshPager(); } catch (e) { console.error(e); } }, 150);
   }
   async function signedUrls(paths) {
     const missing = paths.filter((p) => !S.urls[p]);
@@ -102,6 +104,17 @@
     if (q) list = list.filter((i) => i.title.toLowerCase().includes(q) || `${PREFIX}-${i.num}`.toLowerCase() === q);
     return list;
   }
+  function grouped(items) {
+    const todo = items.filter((i) => statusOf(i) === "todo").sort((a, b) =>
+      (PRI_ORDER[a.priority] ?? 1) - (PRI_ORDER[b.priority] ?? 1) || time(b.updated_at) - time(a.updated_at));
+    const done = items.filter((i) => statusOf(i) === "done").sort((a, b) => time(b.updated_at) - time(a.updated_at));
+    return { todo, done };
+  }
+  // Tasks in the order they appear on screen (collapsed Done tasks are skipped).
+  function pageOrder() {
+    const { todo, done } = grouped(visible());
+    return S.showDone ? [...todo, ...done] : todo;
+  }
   function render() {
     const mine = S.issues.filter((i) => i.assignee === S.me).length;
     $("#n-mine").textContent = mine; $("#n-theirs").textContent = S.issues.length - mine; $("#n-all").textContent = S.issues.length;
@@ -117,9 +130,7 @@
       $("#main").innerHTML = `<div class="list-empty">${S.q.trim() ? `No tasks match “${esc(S.q.trim())}”.` : "No tasks in this view."}</div>`;
       return;
     }
-    const todo = items.filter((i) => statusOf(i) === "todo").sort((a, b) =>
-      (PRI_ORDER[a.priority] ?? 1) - (PRI_ORDER[b.priority] ?? 1) || time(b.updated_at) - time(a.updated_at));
-    const done = items.filter((i) => statusOf(i) === "done").sort((a, b) => time(b.updated_at) - time(a.updated_at));
+    const { todo, done } = grouped(items);
     $("#main").innerHTML = `
       <section class="group" aria-label="To do">
         <div class="group-h"><h2>To do</h2><span class="n">${todo.length}</span></div>
@@ -185,16 +196,48 @@
   }
 
   // ---- Drawer ----
-  function openDrawer(issue) {
+  function openDrawer(issue, paged = false) {
     const isNew = !issue;
     const d = issue ? JSON.parse(JSON.stringify(issue))
       : { id: null, title: "", description: "", status: "todo", priority: "med", assignee: S.me, links: [], screenshots: [] };
     d.status = statusOf(d);
-    S.editing = { d, isNew, uploaded: [], pending: 0, confirmDel: false };
+    S.editing = { d, isNew, uploaded: [], pending: 0, confirmDel: false, orig: snap(d) };
+    S.editing.paged = paged;
     setTaskParam(isNew ? null : keyOf(d));
     drawDrawer();
     if (isNew) setTimeout(() => $("#f-title")?.focus(), 30);
     if (d.screenshots.length) signedUrls(d.screenshots).then(() => { if (S.editing?.d === d) { syncForm(); drawDrawer(); } });
+  }
+  const snap = (d) => JSON.stringify([d.title, d.description ?? "", d.assignee ?? null, d.status, d.priority, d.links, d.screenshots]);
+  function isDirty() {
+    const e = S.editing; if (!e) return false;
+    syncForm();
+    return e.uploaded.length > 0 || e.pending > 0 || snap(e.d) !== e.orig || !!$("#f-link")?.value.trim();
+  }
+  function pagerPos() {
+    const e = S.editing; if (!e || e.isNew) return null;
+    const list = pageOrder();
+    const ix = list.findIndex((x) => x.id === e.d.id);
+    return ix < 0 ? null : { list, ix };
+  }
+  function page(delta) {
+    const p = pagerPos(); if (!p) return;
+    const next = p.list[p.ix + delta]; if (!next) return;
+    if (isDirty()) { toast("You have unsaved changes. Save or cancel them first."); return; }
+    openDrawer(next, true);
+  }
+  // Redraw only the pager so a background reload doesn't wipe in-progress edits.
+  function refreshPager() {
+    if (!S.editing || S.editing.isNew) return;
+    const hadFocus = document.activeElement?.closest?.(".pager") ? document.activeElement.dataset.act : null;
+    const p = pagerPos();
+    document.querySelectorAll("#overlay .pager").forEach((el) => {
+      if (!p) { el.remove(); return; }
+      el.querySelector('[data-act="prev"]').disabled = p.ix === 0;
+      el.querySelector('[data-act="next"]').disabled = p.ix === p.list.length - 1;
+      el.querySelector(".pos").innerHTML = `${p.ix + 1}<span>/${p.list.length}</span>`;
+    });
+    if (hadFocus) $(`#overlay .pager.side [data-act="${hadFocus}"]`)?.focus();
   }
   function closeDrawer(saved) {
     const e = S.editing; if (!e) return;
@@ -207,10 +250,17 @@
     const d = e.d;
     const people = `<option value="">Unassigned</option>` + S.members.map((m) =>
       `<option value="${esc(m.email)}" ${m.email === d.assignee ? "selected" : ""}>${esc(m.display_name)}${m.email === S.me ? " (me)" : ""}</option>`).join("");
+    const p = pagerPos();
+    const pager = (cls) => p ? `<div class="pager ${cls}" role="group" aria-label="Browse tasks">
+        <button type="button" class="pg" data-act="prev" aria-label="Previous task" title="Previous task (↑)" ${p.ix ? "" : "disabled"}>${ICON.up}</button>
+        <span class="pos" aria-live="polite">${p.ix + 1}<span>/${p.list.length}</span></span>
+        <button type="button" class="pg" data-act="next" aria-label="Next task" title="Next task (↓)" ${p.ix < p.list.length - 1 ? "" : "disabled"}>${ICON.down}</button>
+      </div>` : "";
     $("#overlay").innerHTML = `
       <div class="scrim" data-act="close"></div>
-      <div class="dialog" role="dialog" aria-modal="true" aria-label="${e.isNew ? "New task" : "Edit task"}">
-        <div class="drawer-h"><span class="key">${e.isNew ? "New task" : `${PREFIX}-${d.num}`}</span>
+      ${pager("side")}
+      <div class="dialog${e.paged ? " paged" : ""}" role="dialog" aria-modal="true" aria-label="${e.isNew ? "New task" : "Edit task"}">
+        <div class="drawer-h"><span class="key">${e.isNew ? "New task" : `${PREFIX}-${d.num}`}</span>${pager("inline")}
           ${e.isNew ? "" : `<button type="button" class="btn ghost copy-link" data-act="copy-link" title="Copy a link to this task">${ICON.link}<span>Copy link</span></button>`}
           <button type="button" class="icon-btn x" data-act="close" aria-label="Close">${ICON.x}</button></div>
         <div class="drawer-b">
@@ -345,6 +395,8 @@
     if (a === "new") openDrawer(null);
     else if (a === "close") closeDrawer(false);
     else if (a === "save") save();
+    else if (a === "prev") page(-1);
+    else if (a === "next") page(1);
     else if (a === "del") { syncForm(); S.editing.confirmDel = true; drawDrawer(); }
     else if (a === "del-no") { syncForm(); S.editing.confirmDel = false; drawDrawer(); }
     else if (a === "del-yes") del();
@@ -371,6 +423,13 @@
   document.addEventListener("keydown", (ev) => {
     if (ev.key === "Escape") { const lb = $(".lightbox"); if (lb) lb.remove(); else if (S.editing) closeDrawer(false); }
     if (ev.key === "Enter" && (ev.metaKey || ev.ctrlKey) && S.editing) save();
+    // Page through tasks with ↑/↓ (or K/J) unless the user is typing in a field.
+    if (S.editing && !S.editing.isNew && !ev.metaKey && !ev.ctrlKey && !ev.altKey && !$(".lightbox")) {
+      const el = document.activeElement;
+      const typing = el && (el.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName));
+      const delta = { ArrowUp: -1, ArrowDown: 1, k: -1, j: 1 }[ev.key];
+      if (delta && !typing) { ev.preventDefault(); page(delta); }
+    }
   });
 
   // ---- Boot ----
