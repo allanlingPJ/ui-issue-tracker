@@ -145,12 +145,18 @@
       </button>
     </div>`;
   }
+  // PATCH is rejected by the API gateway's CORS preflight, so "update" is done as a POST upsert on id.
+  function updateIssue(id, fields) {
+    const cur = S.issues.find((x) => x.id === id) || {};
+    const base = { title: cur.title, description: cur.description ?? "", assignee: cur.assignee ?? null, status: cur.status, priority: cur.priority, links: cur.links || [], screenshots: cur.screenshots || [] };
+    return S.sb.from("issues").upsert({ ...base, ...fields, id }, { onConflict: "id" }).select("id");
+  }
   async function toggleDone(id) {
     const i = S.issues.find((x) => x.id === id); if (!i) return;
     const prev = i.status;
     const next = statusOf(i) === "done" ? "todo" : "done";
     i.status = next; i.updated_at = new Date().toISOString(); render();
-    const { error } = await S.sb.from("issues").update({ status: next }).eq("id", id);
+    const { error } = await updateIssue(id, { status: next });
     if (error) { i.status = prev; render(); toast("Couldn't update that task. Try again."); return; }
     toast(next === "done" ? `${PREFIX}-${i.num} done` : `${PREFIX}-${i.num} reopened`);
   }
@@ -244,8 +250,9 @@
     const btn = $('[data-act="save"]'); if (btn) btn.disabled = true;
     const res = e.isNew
       ? await S.sb.from("issues").insert(body).select("num").single()
-      : await S.sb.from("issues").update(body).eq("id", d.id);
-    if (res.error) { if (btn) btn.disabled = false; toast("Couldn't save. Check your connection and try again."); return; }
+      : await updateIssue(d.id, body);
+    if (!res.error && !e.isNew && !(res.data && res.data.length)) res.error = { message: "No rows updated (blocked by permissions or the task no longer exists)" };
+    if (res.error) { console.error("save failed", res.error); if (btn) btn.disabled = false; toast(`Couldn't save: ${res.error.message || "check your connection and try again."}`); return; }
     if (!e.isNew) {
       const before = S.issues.find((i) => i.id === d.id)?.screenshots || [];
       const removed = before.filter((p) => !d.screenshots.includes(p));
